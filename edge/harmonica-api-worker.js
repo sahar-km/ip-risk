@@ -1572,34 +1572,35 @@ async function fetchScamalyticsData(ip) {
     // Direct is kept below only as a last-resort fallback, for the rare
     // case where every proxy in both groups is down.
     const groupA = [
-        { name: 'CorsProxyIO', url: `https://corsproxy.io/?url=${encodeURIComponent(targetUrl)}` },
-        { name: 'Codetabs', url: `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(targetUrl)}` },
-        { name: 'AllOrigins Raw', url: `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}` }
+        { name: 'AllOrigins JSON', url: `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`, type: 'json' },
+        { name: 'CorsProxyIO', url: `https://corsproxy.io/?url=${encodeURIComponent(targetUrl)}`, type: 'raw' },
+        { name: 'Codetabs', url: `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(targetUrl)}`, type: 'raw' }
     ];
 
     try {
-        const html = await raceProxies(groupA, 4000, ip);
+        const html = await raceProxies(groupA, 6000, ip);
         return parseScamalyticsHTML(html, ip);
     } catch (eA) {
         console.error(`group A proxies exhausted for ${ip}: ${eA.message} (elapsed=${Date.now() - startedAt}ms)`);
         const groupB = [
-            { name: 'ThingProxy', url: `https://thingproxy.freeboard.io/fetch/${targetUrl}` },
-            { name: 'JSONPlaceholder Proxy', url: `https://jsonp.afeld.me/?url=${encodeURIComponent(targetUrl)}` }
+            { name: 'ThingProxy', url: `https://thingproxy.freeboard.io/fetch/${targetUrl}`, type: 'raw' },
+            { name: 'JSONPlaceholder Proxy', url: `https://jsonp.afeld.me/?url=${encodeURIComponent(targetUrl)}`, type: 'raw' }
         ];
 
         try {
             const html = await raceProxies(groupB, 5000, ip);
             return parseScamalyticsHTML(html, ip);
         } catch (eB) {
-            console.error(`group B proxies exhausted for ${ip}: ${eB.message}. falling back to a direct fetch (elapsed=${Date.now() - startedAt}ms)`);
-            // Last resort: every proxy failed. Direct is unreliable and
-            // slow, but by this point it's a free extra chance before
-            // giving up entirely, and it's the only path left to try.
+            console.error(`group B proxies exhausted for ${ip}: ${eB.message}. falling back to direct fetch / API fallback (elapsed=${Date.now() - startedAt}ms)`);
             try {
                 const html = await fetchDirectOnly(ip, targetUrl);
                 return parseScamalyticsHTML(html, ip);
             } catch (eC) {
-                console.error(`direct fallback also failed for ${ip}: ${eC.message}. all connection paths failed, elapsed=${Date.now() - startedAt}ms`);
+                console.error(`direct fallback failed for ${ip}: ${eC.message}. Trying IP API fallback...`);
+                const fallbackData = await fetchFallbackIpData(ip);
+                if (fallbackData) {
+                    return fallbackData;
+                }
                 const failResponse = new Response('1', {
                     headers: { 'Cache-Control': `public, max-age=${NEGATIVE_CACHE_TTL_SECONDS}` }
                 });
@@ -1608,6 +1609,93 @@ async function fetchScamalyticsData(ip) {
             }
         }
     }
+}
+
+async function fetchFallbackIpData(ip) {
+    try {
+        const res = await withConnectionSlot(() => fetch(`http://ip-api.com/json/${ip}?fields=status,message,country,countryCode,regionName,city,zip,isp,org,as,proxy,hosting`, {
+            headers: { 'User-Agent': getRandomUserAgent() },
+            signal: AbortSignal.timeout(5000)
+        }));
+        if (res.ok) {
+            const data = await res.json();
+            if (data.status === 'success') {
+                const isProxy = data.proxy === true;
+                const isHosting = data.hosting === true;
+                let fraudScore = 0;
+                if (isProxy && isHosting) fraudScore = 75;
+                else if (isProxy) fraudScore = 50;
+                else if (isHosting) fraudScore = 30;
+
+                let riskLevel = 'very_low';
+                if (fraudScore > 75) riskLevel = 'very_high';
+                else if (fraudScore > 50) riskLevel = 'high';
+                else if (fraudScore > 25) riskLevel = 'medium';
+                else if (fraudScore > 0) riskLevel = 'low';
+
+                return {
+                    ip: ip,
+                    fraudScore: fraudScore,
+                    risk: riskLevel,
+                    details: {
+                        'Country Name': data.country || null,
+                        'Country Code': data.countryCode || null,
+                        'State / Province': data.regionName || null,
+                        'City': data.city || null,
+                        'Postal Code': data.zip || null,
+                        'ISP Name': data.isp || null,
+                        'ISP': data.isp || null,
+                        'Organization Name': data.org || null,
+                        'ASN': data.as || null,
+                        'Datacenter': isHosting ? 'Yes' : 'No',
+                        'Public Proxy': isProxy ? 'Yes' : 'No',
+                        'Anonymizing VPN': isProxy ? 'Yes' : 'No',
+                        'Tor Exit Node': 'No',
+                        'Server': isHosting ? 'Yes' : 'No',
+                        'Web Proxy': 'No'
+                    }
+                };
+            }
+        }
+    } catch (e) {
+    }
+
+    try {
+        const res = await withConnectionSlot(() => fetch(`https://ipwhois.app/json/${ip}`, {
+            headers: { 'User-Agent': getRandomUserAgent() },
+            signal: AbortSignal.timeout(5000)
+        }));
+        if (res.ok) {
+            const data = await res.json();
+            if (data.success !== false) {
+                return {
+                    ip: ip,
+                    fraudScore: 0,
+                    risk: 'very_low',
+                    details: {
+                        'Country Name': data.country || null,
+                        'Country Code': data.country_code || null,
+                        'State / Province': data.region || null,
+                        'City': data.city || null,
+                        'Postal Code': data.postal || null,
+                        'ISP Name': data.isp || null,
+                        'ISP': data.isp || null,
+                        'Organization Name': data.org || null,
+                        'ASN': data.asn || null,
+                        'Datacenter': 'No',
+                        'Public Proxy': 'No',
+                        'Anonymizing VPN': 'No',
+                        'Tor Exit Node': 'No',
+                        'Server': 'No',
+                        'Web Proxy': 'No'
+                    }
+                };
+            }
+        }
+    } catch (e) {
+    }
+
+    return null;
 }
 
 const NEGATIVE_CACHE_TTL_SECONDS = 45;
@@ -1666,7 +1754,15 @@ async function attemptProxy(proxy, timeoutMs, ip) {
             if (!response.ok) {
                 throw new Error(`Status ${response.status}`);
             }
-            const html = await response.text();
+
+            let html = '';
+            if (proxy.type === 'json') {
+                const data = await response.json();
+                html = data.contents || '';
+            } else {
+                html = await response.text();
+            }
+
             if (!html || html.length < 1000) {
                 throw new Error('Response too short');
             }
