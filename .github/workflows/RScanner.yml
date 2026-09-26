@@ -1,0 +1,57 @@
+name: Rust Proxy Scanner
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '**/proxies-main.rs'
+      - '**/*.yml' 
+#  schedule:
+#    - cron: '0 5 * * *'
+  workflow_dispatch:
+
+jobs:
+  update-proxies:
+    runs-on: ubuntu-26.04
+    name: Scan and test proxies
+    timeout-minutes: 20
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v7
+      with:
+          fetch-depth: 1
+          submodules: 'recursive'
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Install Rust Toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache Rust dependencies
+      uses: Swatinem/rust-cache@v2
+      with:
+        cache-on-failure: true
+
+    - name: Build Rust Project
+      run: cargo build --release
+
+    - name: Give Execute Permission to Binary
+      run: chmod +x ./target/release/RScanner
+
+    - name: Run Scanner
+      env:
+        RISK_API_HOST: ${{ secrets.RISK_API_HOST }}
+        NORTHERN_TERRITORY: ${{ secrets.NORTHERN_TERRITORY }}
+      run: ./target/release/RScanner
+
+    - name: Commit and Push if Changed
+      if: ${{ success() }}
+      run: |
+        git config --global user.name "Github Actions"
+        git config --global user.email "actions@github.com"
+        git add sub/ProxyIP-Daily.md
+        git diff --cached --quiet || git commit -m "ProxyIP Daily Update | $(TZ='Asia/Tehran' date '+%Y-%m-%d %H:%M:%S') | Fetched, validated, enriched & risk-scored all active proxies"
+        git -c committer.name="Diana-Cl" -c committer.email="135276904+Diana-Cl@users.noreply.github.com" commit --amend --no-edit
+        git push origin main
+      shell: bash
